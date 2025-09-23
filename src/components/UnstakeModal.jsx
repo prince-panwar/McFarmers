@@ -1,18 +1,25 @@
 import React, { useState, useEffect } from "react"
-import { PublicKey, Transaction } from "@solana/web3.js"
+import { PublicKey, Transaction, SystemProgram } from "@solana/web3.js"
 import { BN } from "@coral-xyz/anchor"
 import { Buffer } from "buffer"
 import "../Styles.css"
 import { connection, program, getAccountData } from "../anchor/setup"
 
-export default function StakeModal({ open, onClose, walletConnected }) {
-  const [selectedPool, setSelectedPool] = useState("Pool 1")
+export default function UnstakeModal({
+  open,
+  onClose,
+  walletConnected,
+  poolType = "flexible",
+}) {
   const [amount, setAmount] = useState("")
   const [loading, setLoading] = useState(false)
   const [txSig, setTxSig] = useState("")
   const [error, setError] = useState("")
   const [accountData, setAccountData] = useState(null)
   const [publicKey, setPublicKey] = useState(null)
+  const [userStakeData, setUserStakeData] = useState(null)
+  const [tokenDecimals, setTokenDecimals] = useState(6)
+  const [maxWithdrawable, setMaxWithdrawable] = useState(0)
 
   // Get wallet public key and account data when wallet is connected
   useEffect(() => {
@@ -26,6 +33,10 @@ export default function StakeModal({ open, onClose, walletConnected }) {
           // Fetch account data
           const data = await getAccountData()
           setAccountData(data)
+
+          // Fetch user stake data for current pool type
+          await fetchUserStakeData(pk, poolType, data)
+
           console.log("Account Data:", data)
         } catch (error) {
           console.error("Error fetching data:", error)
@@ -36,25 +47,76 @@ export default function StakeModal({ open, onClose, walletConnected }) {
     if (open && walletConnected) {
       fetchData()
     }
-  }, [open, walletConnected])
+  }, [open, walletConnected, poolType])
 
-  // Pool configurations
-  const poolConfigs = {
-    "Pool 1": {
-      type: "flexible",
-      name: "McFlex Pool",
-      icon: "🍔",
-      description: "Instant withdrawals, Lower APY",
-    },
-    "Pool 2": {
-      type: "locked",
-      name: "McLock Pool",
-      icon: "🍟",
-      description: "7-day lock, Higher APY",
-    },
+  const fetchUserStakeData = async (
+    userPublicKey,
+    currentPoolType,
+    accountData
+  ) => {
+    try {
+      // Derive user stake PDA
+      const [userStakePda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("user"),
+          userPublicKey.toBuffer(),
+          Buffer.from(currentPoolType),
+        ],
+        program.programId
+      )
+
+      // Fetch user stake account
+      const userStakeAccount = await program.account.userStake.fetch(
+        userStakePda
+      )
+
+      // Find matching pool for token decimals
+      const matchingPool = accountData?.pools?.find((pool) => {
+        const accountPoolType = pool.account.poolType
+        if (currentPoolType === "flexible") {
+          return accountPoolType.flexible !== undefined
+        } else if (currentPoolType === "locked") {
+          return accountPoolType.locked !== undefined
+        }
+        return false
+      })
+
+      if (matchingPool) {
+        // Get token decimals
+        const { getMint } = await import("@solana/spl-token")
+        const mint = matchingPool.account.mint
+
+        try {
+          const mintInfo = await getMint(connection, mint)
+          setTokenDecimals(mintInfo.decimals)
+        } catch (err) {
+          console.warn(
+            "Failed to fetch token decimals, using default (6):",
+            err
+          )
+        }
+
+        // Calculate max withdrawable amount
+        const stakeAmount = userStakeAccount.amount.toNumber()
+        const decimalsMultiplier = Math.pow(10, tokenDecimals)
+        setMaxWithdrawable(stakeAmount / decimalsMultiplier)
+
+        setUserStakeData({
+          ...userStakeAccount,
+          stakedAmount: stakeAmount / decimalsMultiplier,
+          lastStakeTime: new Date(
+            userStakeAccount.lastStakeTime.toNumber() * 1000
+          ),
+        })
+      }
+    } catch (error) {
+      console.log("No stake found for this pool type:", error)
+      setUserStakeData(null)
+      setMaxWithdrawable(0)
+    }
   }
 
-  const handleStake = async () => {
+  const handleUnstake = async () => {
     if (!walletConnected || !publicKey || !amount) {
       setError("Please connect wallet and enter amount")
       return
@@ -65,15 +127,17 @@ export default function StakeModal({ open, onClose, walletConnected }) {
       return
     }
 
+    if (parseFloat(amount) > maxWithdrawable) {
+      setError(`Maximum withdrawable: ${maxWithdrawable} tokens`)
+      return
+    }
+
     setLoading(true)
     setError("")
     setTxSig("")
 
     try {
-      const selectedPoolConfig = poolConfigs[selectedPool]
-      const poolType = selectedPoolConfig.type // "flexible" or "locked"
-
-      // Find the matching pool from accountData based on poolType
+      // Find the matching pool
       const matchingPool = accountData?.pools?.find((pool) => {
         const accountPoolType = pool.account.poolType
         if (poolType === "flexible") {
@@ -85,36 +149,18 @@ export default function StakeModal({ open, onClose, walletConnected }) {
       })
 
       if (!matchingPool) {
-        setError(`${poolType} pool not found in account data`)
+        setError(`${poolType} pool not found`)
         return
       }
 
-      // Extract mint address from the matching pool
       const mint = matchingPool.account.mint
 
-      console.log("Selected Pool Type:", poolType)
-      console.log("Mint Address:", mint.toString())
-
-      // ADDED: Fetch token decimals dynamically from the mint
-      const { getMint } = await import("@solana/spl-token")
-      let tokenDecimals = 6 // Default fallback
-
-      try {
-        const mintInfo = await getMint(connection, mint)
-        tokenDecimals = mintInfo.decimals
-        console.log("Token Decimals:", tokenDecimals)
-      } catch (err) {
-        console.warn("Failed to fetch token decimals, using default (6):", err)
-        // Continue with default decimals if fetch fails
-      }
-
-      // Derive pool PDA based on selected pool type
+      // Derive PDAs
       const [poolPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("pool"), Buffer.from(poolType)],
         program.programId
       )
 
-      // Derive user stake PDA
       const [userStakePda] = PublicKey.findProgramAddressSync(
         [Buffer.from("user"), publicKey.toBuffer(), Buffer.from(poolType)],
         program.programId
@@ -145,48 +191,26 @@ export default function StakeModal({ open, onClose, walletConnected }) {
 
       const adminTokenAccount = await getAssociatedTokenAddress(
         mint,
-        new PublicKey("GdLfQn7SkU2MCH4vH1Q7cY8q3feHwhRFGJjHXNkRK3hS"), // Your hardcoded admin key
+        new PublicKey("GdLfQn7SkU2MCH4vH1Q7cY8q3feHwhRFGJjHXNkRK3hS"),
         false,
         TOKEN_PROGRAM_ID,
         ASSOCIATED_TOKEN_PROGRAM_ID
       )
 
-      // UPDATED: Convert amount to token units using actual decimals
+      // Convert amount to token units
       const tokenMultiplier = Math.pow(10, tokenDecimals)
-      const stakeAmount = new BN(parseFloat(amount) * tokenMultiplier)
+      const withdrawAmount = new BN(parseFloat(amount) * tokenMultiplier)
 
-      console.log("Stake calculation:", {
+      console.log("Withdraw calculation:", {
         inputAmount: amount,
         tokenDecimals,
         tokenMultiplier,
-        finalStakeAmount: stakeAmount.toString(),
+        finalWithdrawAmount: withdrawAmount.toString(),
       })
 
-      // Validate against minimum stake from pool data
-      const minStakeRequired = matchingPool.account.minStake.toNumber()
-      if (stakeAmount.toNumber() < minStakeRequired) {
-        setError(
-          `Minimum stake required: ${minStakeRequired / tokenMultiplier} tokens`
-        )
-        return
-      }
-
-      console.log("Transaction accounts:", {
-        user: publicKey.toString(),
-        pool: poolPda.toString(),
-        userStake: userStakePda.toString(),
-        mint: mint.toString(),
-        userTokenAccount: userTokenAccount.toString(),
-        tokenVault: tokenVault.toString(),
-        adminTokenAccount: adminTokenAccount.toString(),
-      })
-
-      // Import SystemProgram from @solana/web3.js
-      const { SystemProgram } = await import("@solana/web3.js")
-
-      // Create stake instruction
+      // Create withdraw instruction
       const instruction = await program.methods
-        .stake(stakeAmount)
+        .withdraw(withdrawAmount)
         .accounts({
           user: publicKey,
           pool: poolPda,
@@ -196,7 +220,6 @@ export default function StakeModal({ open, onClose, walletConnected }) {
           tokenVault: tokenVault,
           adminTokenAccount: adminTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
         })
         .instruction()
 
@@ -224,9 +247,10 @@ export default function StakeModal({ open, onClose, walletConnected }) {
       setTxSig(signature)
       setAmount("")
 
-      // Refresh account data after successful stake
+      // Refresh data after successful withdrawal
       const updatedData = await getAccountData()
       setAccountData(updatedData)
+      await fetchUserStakeData(publicKey, poolType, updatedData)
 
       // Auto-close after 3 seconds
       setTimeout(() => {
@@ -234,27 +258,18 @@ export default function StakeModal({ open, onClose, walletConnected }) {
         setTxSig("")
       }, 3000)
     } catch (err) {
-      console.error("Staking error:", err)
+      console.error("Withdrawal error:", err)
 
       if (err.message.includes("User rejected")) {
         setError("Transaction cancelled by user")
-      } else if (err.message.includes("insufficient funds")) {
-        setError("Insufficient SOL for transaction fees")
-      } else if (err.message.includes("insufficient")) {
-        setError("Insufficient token balance")
-      } else if (err.message.includes("0x1")) {
-        setError("Pool not initialized or insufficient balance")
+      } else if (err.message.includes("StillLocked")) {
+        setError("Tokens are still locked - withdrawal not allowed yet")
+      } else if (err.message.includes("InsufficientStake")) {
+        setError("Insufficient staked amount")
       } else if (err.message.includes("AmountTooSmall")) {
-        setError("Amount below minimum stake requirement")
-      } else if (
-        err.message.includes("InvalidProgramId") ||
-        err.message.includes("0xbc0")
-      ) {
-        setError("Invalid program configuration - please refresh and try again")
-      } else if (err.message.includes("Non-base58")) {
-        setError("Invalid address format - please refresh and try again")
+        setError("Withdrawal amount too small")
       } else {
-        setError(`Staking failed: ${err.message}`)
+        setError(`Withdrawal failed: ${err.message}`)
       }
     } finally {
       setLoading(false)
@@ -267,6 +282,10 @@ export default function StakeModal({ open, onClose, walletConnected }) {
       setTxSig("")
       onClose()
     }
+  }
+
+  const setMaxAmount = () => {
+    setAmount(maxWithdrawable.toString())
   }
 
   if (!open) return null
@@ -308,36 +327,54 @@ export default function StakeModal({ open, onClose, walletConnected }) {
             color: "var(--gold)",
           }}
         >
-          Stake Tokens
+          Unstake Tokens
         </h2>
 
-        {/* Account Info Display */}
-        {walletConnected && publicKey && (
+        {/* User Stake Info */}
+        {walletConnected && userStakeData && (
           <div
             style={{
               background: "rgba(255,215,0,0.1)",
-              padding: "8px 12px",
+              padding: "12px",
               borderRadius: "8px",
               marginBottom: "12px",
               border: "1px solid rgba(255,215,0,0.2)",
             }}
           >
-            <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-              Wallet: {publicKey.toString().slice(0, 4)}...
-              {publicKey.toString().slice(-4)}
+            <div
+              style={{
+                fontSize: "14px",
+                color: "var(--gold)",
+                marginBottom: "4px",
+              }}
+            >
+              📊 Your Stake ({poolType})
             </div>
-            {accountData && (
-              <div
-                style={{
-                  fontSize: "11px",
-                  color: "var(--muted)",
-                  marginTop: "2px",
-                }}
-              >
-                Pools: {accountData.pools.length} | Stakes:{" "}
-                {accountData.userStakes.length}
-              </div>
-            )}
+            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+              Staked: {userStakeData.stakedAmount.toFixed(6)} tokens
+            </div>
+            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+              Last Stake: {userStakeData.lastStakeTime.toLocaleDateString()}
+            </div>
+            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+              Available: {maxWithdrawable.toFixed(6)} tokens
+            </div>
+          </div>
+        )}
+
+        {!userStakeData && walletConnected && (
+          <div
+            style={{
+              background: "rgba(244,67,54,0.1)",
+              padding: "12px",
+              borderRadius: "8px",
+              marginBottom: "12px",
+              border: "1px solid rgba(244,67,54,0.2)",
+            }}
+          >
+            <div style={{ fontSize: "14px", color: "var(--red-accent)" }}>
+              No stake found in {poolType} pool
+            </div>
           </div>
         )}
 
@@ -345,83 +382,77 @@ export default function StakeModal({ open, onClose, walletConnected }) {
           <label
             style={{ display: "block", marginBottom: 12, fontWeight: 500 }}
           >
-            <span style={{ color: "var(--muted)" }}>Select Pool</span>
-            <select
-              value={selectedPool}
-              onChange={(e) => {
-                setSelectedPool(e.target.value)
-                setError("") // Clear error when changing pools
-              }}
-              disabled={loading}
-              style={{
-                width: "100%",
-                marginTop: 8,
-                padding: "12px",
-                borderRadius: "14px",
-                border: "var(--border-thin)",
-                background: "rgba(255,255,255,.06)",
-                color: "var(--text)",
-                fontWeight: 700,
-                fontSize: "16px",
-                cursor: loading ? "not-allowed" : "pointer",
-              }}
-            >
-              <option value="Pool 1">
-                🍔 McFlex Pool (Instant, Lower APY)
-              </option>
-              <option value="Pool 2">
-                🍟 McLock Pool (7d lock, Higher APY)
-              </option>
-            </select>
+            <span style={{ color: "var(--muted)" }}>Withdrawal Amount</span>
+            <div style={{ position: "relative" }}>
+              <input
+                type="number"
+                min="0"
+                step="0.000001"
+                value={amount}
+                onChange={(e) => {
+                  setAmount(e.target.value)
+                  setError("")
+                }}
+                disabled={loading || !userStakeData}
+                style={{
+                  width: "100%",
+                  marginTop: 8,
+                  padding: "12px",
+                  paddingRight: "60px",
+                  borderRadius: "14px",
+                  border: "var(--border-thin)",
+                  background: "rgba(255,255,255,.06)",
+                  color: "var(--text)",
+                  fontWeight: 700,
+                  fontSize: "16px",
+                }}
+                placeholder={
+                  userStakeData ? `Max: ${maxWithdrawable.toFixed(6)}` : "0"
+                }
+              />
+              {userStakeData && (
+                <button
+                  onClick={setMaxAmount}
+                  disabled={loading}
+                  style={{
+                    position: "absolute",
+                    right: "8px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "var(--gold)",
+                    color: "black",
+                    border: "none",
+                    borderRadius: "6px",
+                    padding: "4px 8px",
+                    fontSize: "11px",
+                    fontWeight: "700",
+                    cursor: loading ? "not-allowed" : "pointer",
+                  }}
+                >
+                  MAX
+                </button>
+              )}
+            </div>
           </label>
 
-          <label
-            style={{ display: "block", marginBottom: 12, fontWeight: 500 }}
-          >
-            <span style={{ color: "var(--muted)" }}>Stake Amount</span>
-            <input
-              type="number"
-              min="0"
-              step="0.000001"
-              value={amount}
-              onChange={(e) => {
-                setAmount(e.target.value)
-                setError("") // Clear error when typing
-              }}
-              disabled={loading}
-              style={{
-                width: "100%",
-                marginTop: 8,
-                padding: "12px",
-                borderRadius: "14px",
-                border: "var(--border-thin)",
-                background: "rgba(255,255,255,.06)",
-                color: "var(--text)",
-                fontWeight: 700,
-                fontSize: "16px",
-              }}
-              placeholder="Enter amount"
-            />
-          </label>
-
-          {/* Pool info display */}
+          {/* Pool info and fees */}
           <div
             style={{
-              background: "rgba(255,215,0,0.1)",
+              background: "rgba(244,67,54,0.1)",
               padding: "12px",
               borderRadius: "10px",
-              border: "1px solid rgba(255,215,0,0.3)",
+              border: "1px solid rgba(244,67,54,0.3)",
               marginBottom: "12px",
             }}
           >
             <div
               style={{
-                color: "var(--gold)",
+                color: "var(--red-accent)",
                 fontSize: "14px",
                 fontWeight: 600,
               }}
             >
-              {poolConfigs[selectedPool].icon} {poolConfigs[selectedPool].name}
+              ⚠️ Withdrawal Fees
             </div>
             <div
               style={{
@@ -430,17 +461,19 @@ export default function StakeModal({ open, onClose, walletConnected }) {
                 marginTop: "4px",
               }}
             >
-              {poolConfigs[selectedPool].description}
+              10% unstake fee will be deducted
             </div>
-            <div
-              style={{
-                color: "var(--muted)",
-                fontSize: "11px",
-                marginTop: "4px",
-              }}
-            >
-              Fees: 2% stake fee, 10% unstake fee
-            </div>
+            {poolType === "locked" && (
+              <div
+                style={{
+                  color: "var(--muted)",
+                  fontSize: "11px",
+                  marginTop: "4px",
+                }}
+              >
+                🔒 Locked pool: 7-day minimum lock period
+              </div>
+            )}
           </div>
         </div>
 
@@ -456,7 +489,7 @@ export default function StakeModal({ open, onClose, walletConnected }) {
               borderRadius: "8px",
             }}
           >
-            🔒 Please connect your wallet to stake.
+            🔒 Please connect your wallet to unstake.
           </div>
         )}
 
@@ -502,20 +535,30 @@ export default function StakeModal({ open, onClose, walletConnected }) {
 
         <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
           <button
-            className="btn gold"
-            style={{ flex: 1, fontWeight: 900, fontSize: "16px" }}
+            className="btn"
+            style={{
+              flex: 1,
+              fontWeight: 900,
+              fontSize: "16px",
+              backgroundColor: "var(--red-accent)",
+              borderColor: "var(--red-accent)",
+            }}
             disabled={
-              !walletConnected || !amount || loading || parseFloat(amount) <= 0
+              !walletConnected ||
+              !amount ||
+              loading ||
+              parseFloat(amount) <= 0 ||
+              !userStakeData
             }
-            onClick={handleStake}
+            onClick={handleUnstake}
           >
             {loading ? (
               <>
-                <span style={{ marginRight: "8px" }}>🍟</span>
-                Staking...
+                <span style={{ marginRight: "8px" }}>⏳</span>
+                Processing...
               </>
             ) : (
-              "Confirm Stake"
+              "Confirm Unstake"
             )}
           </button>
           <button
