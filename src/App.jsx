@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react"
+import React, { useState } from "react"
 import Hero from "./components/Hero.jsx"
 import MemeBox from "./components/MemeBox.jsx"
 import Clicker from "./components/Clicker.jsx"
@@ -6,77 +6,30 @@ import StatsRef from "./components/StatsRef.jsx"
 import Pools from "./components/Pools.jsx"
 import Socials from "./components/Socials.jsx"
 import StakeModal from "./components/StakeModal.jsx"
-import UnstakeModal from "./components/UnstakeModal" // Add this import
+import UnstakeModal from "./components/UnstakeModal"
 
 export default function App() {
+  // Remove local wallet management; rely on StatsRef
   const [walletConnected, setWalletConnected] = useState(false)
   const [walletAddress, setWalletAddress] = useState("")
   const [showStakeModal, setShowStakeModal] = useState(false)
-  const [showUnstakeModal, setShowUnstakeModal] = useState(false) // Add this state
-  const [selectedPoolType, setSelectedPoolType] = useState("flexible") // Add this state
+  const [showUnstakeModal, setShowUnstakeModal] = useState(false)
+  const [selectedPoolType, setSelectedPoolType] = useState("flexible")
 
-  useEffect(() => {
-    // Check wallet connection on mount
-    if (window.solana && window.solana.isConnected) {
-      setWalletConnected(true)
-      console.log(
-        "Wallet is already connected:",
-        window.solana.publicKey.toString()
-      )
-      setWalletAddress(window.solana.publicKey.toString())
-    }
-    // Listen for wallet connect/disconnect
-    if (window.solana) {
-      window.solana.on("connect", (publicKey) => {
-        setWalletConnected(true)
-        setWalletAddress(publicKey.toString())
-      })
-      window.solana.on("disconnect", () => {
-        setWalletConnected(false)
-        setWalletAddress("")
-      })
-    }
-    return () => {
-      if (window.solana) {
-        window.solana.removeAllListeners("connect")
-        window.solana.removeAllListeners("disconnect")
-      }
-    }
-  }, [])
-
-  const handleConnectWallet = async () => {
-    if (window.solana) {
-      try {
-        const response = await window.solana.connect()
-        setWalletConnected(true)
-        setWalletAddress(response.publicKey.toString())
-      } catch (e) {
-        alert("Failed to connect wallet.", e)
-      }
-    } else {
-      alert("No Solana wallet found. Please install Phantom.")
-    }
+  // Receive wallet status updates from StatsRef
+  const handleWalletUpdate = ({ connected, address }) => {
+    setWalletConnected(connected)
+    setWalletAddress(address || "")
   }
 
-  const handleDisconnectWallet = async () => {
-    if (window.solana) {
-      await window.solana.disconnect()
-      setWalletConnected(false)
-      setWalletAddress("")
-    }
-  }
-
-  // Updated handlers for stake and unstake modals
   const handleOpenStakeModal = (poolType = "flexible") => {
     setSelectedPoolType(poolType)
     setShowStakeModal(true)
   }
-
   const handleOpenUnstakeModal = (poolType = "flexible") => {
     setSelectedPoolType(poolType)
     setShowUnstakeModal(true)
   }
-
   const handleCloseStakeModal = () => setShowStakeModal(false)
   const handleCloseUnstakeModal = () => setShowUnstakeModal(false)
 
@@ -95,8 +48,12 @@ export default function App() {
           </div>
         </div>
         <Socials />
-        {!walletConnected ? (
-          <button className="btn connect-btn" onClick={handleConnectWallet}>
+        {/* {!walletConnected ? (
+          // Header button now triggers StatsRef via a custom event
+          <button
+            className="btn connect-btn"
+            onClick={() => window.dispatchEvent(new CustomEvent("mc-connect-wallet"))}
+          >
             Connect Wallet
           </button>
         ) : (
@@ -106,12 +63,12 @@ export default function App() {
             </span>
             <button
               className="btn disconnect-btn"
-              onClick={handleDisconnectWallet}
+              onClick={() => window.dispatchEvent(new CustomEvent("mc-disconnect-wallet"))}
             >
               Disconnect
             </button>
           </div>
-        )}
+        )} */}
       </header>
 
       <MemeBox />
@@ -119,10 +76,10 @@ export default function App() {
 
       <main className="grid">
         <Clicker />
-        <StatsRef />
+        {/* StatsRef owns the wallet logic and informs App */}
+        <StatsRef onWalletChange={handleWalletUpdate} />
       </main>
 
-      {/* Pass both handlers to Pools */}
       <Pools
         onStake={handleOpenStakeModal}
         onUnstake={handleOpenUnstakeModal}
@@ -133,13 +90,11 @@ export default function App() {
         © {new Date().getFullYear()} McFarmerz — built for Solana degen season.
       </footer>
 
-      {/* Both modals */}
       <StakeModal
         open={showStakeModal}
         onClose={handleCloseStakeModal}
         walletConnected={walletConnected}
       />
-
       <UnstakeModal
         open={showUnstakeModal}
         onClose={handleCloseUnstakeModal}

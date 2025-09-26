@@ -12,7 +12,7 @@ export const program = new Program(IDL, {
 })
 
 // Export mint address
-export const mintAddress = "YOUR_ACTUAL_MINT_ADDRESS" // Replace with your token mint
+export const mintAddress = "HsGeN22851E3uGJ3nERibwB4dViU3YsbVgiau3kgo25c" // Replace with your token mint
 
 // Function to get account data (call this when needed, not at module level)
 export const getAccountData = async () => {
