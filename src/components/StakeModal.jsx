@@ -439,7 +439,7 @@ export default function StakeModal({ open, onClose, walletConnected }) {
                 marginTop: "4px",
               }}
             >
-              Fees: 2% stake fee, 10% unstake fee
+
             </div>
           </div>
         </div>
