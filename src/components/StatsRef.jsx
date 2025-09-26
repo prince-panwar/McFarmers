@@ -1,26 +1,74 @@
+// src/components/StatsRef.jsx
 import React, { useEffect, useState, useCallback } from "react"
+import { PublicKey } from "@solana/web3.js"
+import { Buffer } from "buffer"
+import { connection, program, getAccountData } from "../anchor/setup"
 
 export default function StatsRef({ onWalletChange }) {
   const [tvl, setTvl] = useState(0)
   const [wallet, setWallet] = useState("")
   const [ref, setRef] = useState("")
 
-  // Animate TVL
+  // Fetch TVL from on-chain Pool accounts
   useEffect(() => {
-    let v = 0, target = 300000, step = 6000
-    const id = setInterval(() => {
-      v += step
-      if (v >= target) { v = target; clearInterval(id) }
-      setTvl(v)
-    }, 20)
-    return () => clearInterval(id)
+    let canceled = false
+
+    async function fetchTVL() {
+      try {
+        if (!program || !connection) return
+
+        const poolTypes = ["flexible", "locked"]
+        let total = 0
+
+        for (const poolType of poolTypes) {
+          // Pool PDA: seeds = ["pool", pool_type.to_seed()] with to_seed -> "flexible" | "locked"
+          const [poolPda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("pool"), Buffer.from(poolType)],
+            program.programId
+          )
+
+          const poolAcc = await program.account.pool.fetch(poolPda)
+
+          // Obtain mint decimals
+          let decimals = 6
+          try {
+            const { getMint } = await import("@solana/spl-token")
+            const mintInfo = await getMint(connection, poolAcc.mint)
+            if (mintInfo && typeof mintInfo.decimals === "number") {
+              decimals = mintInfo.decimals
+            }
+          } catch (e) {
+            console.warn("Mint decimals fetch failed; defaulting to 6", e)
+          }
+
+          // total_staked is u64 (BN); scale to UI units
+          const raw =
+            typeof poolAcc.totalStaked?.toNumber === "function"
+              ? poolAcc.totalStaked.toNumber()
+              : Number(poolAcc.totalStaked || 0)
+
+          total += raw / Math.pow(10, decimals)
+        }
+
+        if (!canceled) setTvl(total) // token-denominated TVL across pools
+      } catch (e) {
+        console.error("Failed to fetch TVL:", e)
+      }
+    }
+
+    fetchTVL()
+    const id = setInterval(fetchTVL, 30_000)
+    return () => {
+      canceled = true
+      clearInterval(id)
+    }
   }, [])
 
   const notifyParent = useCallback((connected, address) => {
     onWalletChange?.({ connected, address })
   }, [onWalletChange])
 
-  // Helpers
+  // Phantom provider
   const getProvider = () => {
     const anyWin = window
     if ("solana" in anyWin && anyWin.solana?.isPhantom) {
@@ -37,14 +85,11 @@ export default function StatsRef({ onWalletChange }) {
     setRef(`${window.location.origin}/?ref=${address}`)
   }
 
-  // Eagerly detect already-connected Phantom and attach listeners
+  // Detect existing connection and attach listeners
   useEffect(() => {
     const provider = getProvider()
-    if (!provider) {
-      return
-    }
+    if (!provider) return
 
-    // If already connected on mount
     if (provider.isConnected && provider.publicKey) {
       const addr = provider.publicKey.toString()
       setWallet(addr)
@@ -53,7 +98,6 @@ export default function StatsRef({ onWalletChange }) {
       console.log("Wallet is already connected:", addr)
     }
 
-    // Listeners
     const onConnect = (publicKey) => {
       const addr = publicKey?.toString?.() || ""
       setWallet(addr)
@@ -78,7 +122,7 @@ export default function StatsRef({ onWalletChange }) {
     }
   }, [notifyParent])
 
-  // Public actions the header can trigger
+  // Header event bridge
   useEffect(() => {
     const onHeaderConnect = async () => { await connect() }
     const onHeaderDisconnect = async () => { await disconnect() }
@@ -98,7 +142,7 @@ export default function StatsRef({ onWalletChange }) {
       return
     }
     try {
-      const res = await provider.connect() // may prompt the user
+      const res = await provider.connect()
       const addr = res?.publicKey?.toString?.() || provider.publicKey?.toString?.() || ""
       setWallet(addr)
       updateReferral(addr)
@@ -141,11 +185,13 @@ export default function StatsRef({ onWalletChange }) {
       <div className="kpis" style={{ marginTop: 14 }}>
         <div className="kpi">
           <div className="label">TVL</div>
-          <div className="value">~${tvl.toLocaleString()}</div>
+          <div className="value">~{tvl.toLocaleString()}</div>
         </div>
         <div className="kpi">
           <div className="label">Your Wallet</div>
-          <div className="value">{ wallet.slice(0, 4)}..{wallet.slice(-4) || "Disconnected"}</div>
+          <div className="value">
+            {wallet ? `${wallet.slice(0, 4)}..${wallet.slice(-4)}` : "Disconnected"}
+          </div>
         </div>
         <div className="kpi">
           <div className="label">Network</div>
@@ -154,7 +200,6 @@ export default function StatsRef({ onWalletChange }) {
       </div>
 
       <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-        {/* This button now does the real Phantom connect */}
         <button className="btn primary" onClick={wallet ? disconnect : connect}>
           {wallet ? "Disconnect" : "Connect Wallet"}
         </button>
