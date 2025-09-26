@@ -243,7 +243,7 @@ export default function UnstakeModal({
 
       // Confirm transaction
       await connection.confirmTransaction(signature, "confirmed")
-
+      alert("Unstake successful!")
       setTxSig(signature)
       setAmount("")
 
@@ -259,7 +259,7 @@ export default function UnstakeModal({
       }, 3000)
     } catch (err) {
       console.error("Withdrawal error:", err)
-
+       alert(`Unstake failed: ${err.message}`)
       if (err.message.includes("User rejected")) {
         setError("Transaction cancelled by user")
       } else if (err.message.includes("StillLocked")) {

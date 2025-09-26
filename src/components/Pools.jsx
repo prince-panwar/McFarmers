@@ -62,89 +62,98 @@ export default function Pools({ onStake, onUnstake, walletConnected }) {
   const [loading, setLoading] = useState(false)
 
   // Fetch user stake data for all pools
-  useEffect(() => {
-    const fetchAllUserData = async () => {
-      if (!walletConnected || !window.solana) return
+useEffect(() => {
+  const fetchAllUserData = async () => {
+    if (!walletConnected || !window.solana) return;
 
-      setLoading(true)
-      try {
-        const publicKey = window.solana.publicKey
-        const userData = {}
+    setLoading(true);
+    try {
+      const publicKey = window.solana.publicKey;
+      const next = {
+        flexible: { staked: 0, lastStakeTime: null, hasStake: false },
+        locked: { staked: 0, lastStakeTime: null, hasStake: false },
+      };
 
-        // Fetch data for both pool types
-        const poolTypes = ["flexible", "locked"]
+      // Resolve pools once to get mint and decimals per pool type
+      const accountData = await getAccountData(); // expects { pools: [{ account: { poolType, mint } }] }
 
-        for (const poolType of poolTypes) {
-          try {
-            // Derive user stake PDA
-            const [userStakePda] = PublicKey.findProgramAddressSync(
-              [
-                Buffer.from("user"),
-                publicKey.toBuffer(),
-                Buffer.from(poolType),
-              ],
-              program.programId
-            )
+      function resolvePool(poolTypeStr) {
+        if (!accountData || !accountData.pools) return null;
+        return accountData.pools.find((p) => {
+          const t = p.account.poolType;
+          return poolTypeStr === "flexible" ? t && t.flexible !== undefined : t && t.locked !== undefined;
+        }) || null;
+      }
 
-            // Fetch user stake account
-            const userStakeAccount = await program.account.userStake.fetch(
-              userStakePda
-            )
+      const poolTypes = ["flexible", "locked"];
 
-            // Get account data for token decimals
-            const accountData = await getAccountData()
-            const matchingPool = accountData?.pools?.find((pool) => {
-              const accountPoolType = pool.account.poolType
-              if (poolType === "flexible") {
-                return accountPoolType.flexible !== undefined
-              } else if (poolType === "locked") {
-                return accountPoolType.locked !== undefined
-              }
-              return false
-            })
+      for (const poolType of poolTypes) {
+        try {
+          // PDA seeds must match on-chain: [b"user", user, pool.pool_type.to_seed()]
+          const [userStakePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from("user"), publicKey.toBuffer(), Buffer.from(poolType)], // "flexible" | "locked"
+            program.programId
+          );
 
-            let tokenDecimals = 6
-            if (matchingPool) {
-              try {
-                const { getMint } = await import("@solana/spl-token")
-                const mintInfo = await getMint(
-                  connection,
-                  matchingPool.account.mint
-                )
-                tokenDecimals = mintInfo.decimals
-              } catch (err) {
-                console.warn("Failed to fetch token decimals:", err)
-              }
-            }
+          const userStakeAccount = await program.account.userStake.fetch(userStakePda);
 
-            const decimalsMultiplier = Math.pow(10, tokenDecimals)
-            userData[poolType] = {
-              staked: userStakeAccount.amount.toNumber() / decimalsMultiplier,
-              lastStakeTime: new Date(
-                userStakeAccount.lastStakeTime.toNumber() * 1000
-              ),
-              hasStake: true,
-            }
-          } catch (error) {
-            // No stake found for this pool type
-            userData[poolType] = {
-              staked: 0,
-              lastStakeTime: null,
-              hasStake: false,
+          // Determine token decimals for this pool's mint
+          let tokenDecimals = 6;
+          const poolAcc = resolvePool(poolType);
+          if (poolAcc) {
+            try {
+              const { getMint } = await import("@solana/spl-token");
+              const mintInfo = await getMint(connection, poolAcc.account.mint);
+              tokenDecimals = (mintInfo && typeof mintInfo.decimals === "number") ? mintInfo.decimals : 6;
+            } catch (err) {
+              console.warn("Failed to fetch token decimals:", err);
             }
           }
+
+          // amount in account is net (after 2% fee), scale by decimals
+          let rawAmount = 0;
+          if (userStakeAccount && userStakeAccount.amount != null) {
+            if (typeof userStakeAccount.amount.toNumber === "function") {
+              rawAmount = userStakeAccount.amount.toNumber();
+            } else {
+              rawAmount = Number(userStakeAccount.amount) || 0;
+            }
+          }
+
+          const stakedUi = rawAmount / Math.pow(10, tokenDecimals);
+
+          // last_stake_time is i64 seconds; convert to ms
+          let lastTsSec = 0;
+          if (userStakeAccount && userStakeAccount.lastStakeTime != null) {
+            if (typeof userStakeAccount.lastStakeTime.toNumber === "function") {
+              lastTsSec = userStakeAccount.lastStakeTime.toNumber();
+            } else {
+              lastTsSec = Number(userStakeAccount.lastStakeTime) || 0;
+            }
+          }
+
+          next[poolType] = {
+            staked: stakedUi,
+            lastStakeTime: lastTsSec > 0 ? new Date(lastTsSec * 1000) : null,
+            hasStake: rawAmount > 0,
+          };
+        } catch (e) {
+          next[poolType] = { staked: 0, lastStakeTime: null, hasStake: false };
         }
-
-        setUserStakeData(userData)
-      } catch (error) {
-        console.error("Error fetching user stake data:", error)
-      } finally {
-        setLoading(false)
       }
-    }
 
-    fetchAllUserData()
-  }, [walletConnected])
+      setUserStakeData(next);
+    } catch (error) {
+      console.error("Error fetching user stake data:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  fetchAllUserData();
+}, [walletConnected, program, connection]);
+
+
 
   return (
     <section className="pools card" style={{ marginTop: 18 }}>

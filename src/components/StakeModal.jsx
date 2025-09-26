@@ -220,7 +220,7 @@ export default function StakeModal({ open, onClose, walletConnected }) {
 
       // Confirm transaction
       await connection.confirmTransaction(signature, "confirmed")
-
+      alert("Stake successful!")
       setTxSig(signature)
       setAmount("")
 
@@ -235,7 +235,7 @@ export default function StakeModal({ open, onClose, walletConnected }) {
       }, 3000)
     } catch (err) {
       console.error("Staking error:", err)
-
+      alert(`Staking failed: ${err.message}`)
       if (err.message.includes("User rejected")) {
         setError("Transaction cancelled by user")
       } else if (err.message.includes("insufficient funds")) {
