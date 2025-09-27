@@ -197,30 +197,8 @@ useEffect(() => {
                       {p.poolType === "flexible" ? "🍔 Flexible" : "🍟 Locked"}
                     </div>
                   </div>
-                  <div className="row">
-                    <div className="muted">Your Stake</div>
-                    <div>
-                      {loading
-                        ? "Loading..."
-                        : walletConnected
-                        ? userData.hasStake
-                          ? `${userData.staked.toFixed(6)} MCF`
-                          : "0 MCF"
-                        : "Connect Wallet"}
-                    </div>
-                  </div>
-                  <div className="row">
-                    <div className="muted">Last Stake</div>
-                    <div>
-                      {loading
-                        ? "..."
-                        : walletConnected &&
-                          userData.hasStake &&
-                          userData.lastStakeTime
-                        ? userData.lastStakeTime.toLocaleDateString()
-                        : "Never"}
-                    </div>
-                  </div>
+                
+                
                   <div className="row">
                     <small className="muted">
                       {p.poolType === "locked"
@@ -239,7 +217,7 @@ useEffect(() => {
                     <button
                       className="btn ghost"
                       onClick={() => onUnstake(p.poolType)}
-                      disabled={!walletConnected || !userData.hasStake}
+                      disabled={!walletConnected}
                     >
                       Unstake
                     </button>

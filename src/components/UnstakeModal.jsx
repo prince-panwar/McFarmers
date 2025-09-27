@@ -1,16 +1,41 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react"
 import { PublicKey, Transaction } from "@solana/web3.js"
-import { BN } from "@coral-xyz/anchor"
-import { Buffer } from "buffer"
+import { BN } from "bn.js"
 import "../Styles.css"
 import { connection, program } from "../anchor/setup"
 
-const SEED_USER = Buffer.from("user")
-const SEED_POOL = Buffer.from("pool")
-const SEED_FLEX = Buffer.from("flexible")
-const SEED_LOCK = Buffer.from("locked")
+// Stable seed encoder for browser
+const enc = new TextEncoder()
+const SEED_USER = enc.encode("user")
+const SEED_POOL = enc.encode("pool")
+const SEED_FLEX = enc.encode("flexible")
+const SEED_LOCK = enc.encode("locked")
+
 const ADMIN_OWNER = new PublicKey("GdLfQn7SkU2MCH4vH1Q7cY8q3feHwhRFGJjHXNkRK3hS")
 const SECS_PER_YEAR = 365 * 24 * 60 * 60
+
+// Robust send + confirm using lastValidBlockHeight to avoid duplicate-submit issues
+async function sendAndConfirmOnce(connection, tx, signer) {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash({ commitment: "confirmed" }) // [web:420]
+  tx.recentBlockhash = blockhash
+  tx.feePayer = signer
+  const signed = await window.solana.signTransaction(tx)
+  const raw = signed.serialize()
+  const sig = await connection.sendRawTransaction(raw, {
+    skipPreflight: false,
+    preflightCommitment: "confirmed",
+    maxRetries: 3,
+  })
+  try {
+    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed") // [web:420]
+    return { signature: sig, status: "confirmed" }
+  } catch (e) {
+    const st = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
+    const conf = st?.value?.confirmationStatus
+    if (conf === "confirmed" || conf === "finalized") return { signature: sig, status: conf || "confirmed" }
+    throw e
+  }
+}
 
 export default function UnstakeModal({ open, onClose, walletConnected }) {
   const [publicKey, setPublicKey] = useState(null)
@@ -40,6 +65,7 @@ export default function UnstakeModal({ open, onClose, walletConnected }) {
     setError("")
     setLoading(true)
     try {
+      // 1) fetch all user stakes via memcmp user at offset 8
       const userStakes = await program.account.userStake.all([
         { memcmp: { offset: 8, bytes: publicKey.toBase58() } },
       ]) // [web:68]
@@ -48,62 +74,57 @@ export default function UnstakeModal({ open, onClose, walletConnected }) {
       const { getMint } = await import("@solana/spl-token")
 
       for (const s of userStakes) {
-        const label = s.account.poolType?.locked !== undefined ? "locked" : "flexible"
-        const poolPda = derivePoolPda(label)
+  const label = s.account.poolType?.locked !== undefined ? "locked" : "flexible"
+  const poolSeed = label === "locked" ? SEED_LOCK : SEED_FLEX
+  const [poolPda] = PublicKey.findProgramAddressSync([SEED_POOL, poolSeed], program.programId) // [web:68]
 
-        let poolAcc = null
-        try { poolAcc = await program.account.pool.fetch(poolPda) } catch {}
-        if (!poolAcc) continue
+  let poolAcc = null
+  try { poolAcc = await program.account.pool.fetch(poolPda) } catch {}
+  if (!poolAcc) continue
 
-        const mintPk = new PublicKey(poolAcc.mint)
-        const mintInfo = await getMint(connection, mintPk).catch(() => ({ decimals: 6 }))
-        const decimals = mintInfo.decimals ?? 6
+  const mintPk = new PublicKey(poolAcc.mint)
+  const { getMint } = await import("@solana/spl-token")
+  const mintInfo = await getMint(connection, mintPk).catch(() => ({ decimals: 6 }))
+  const decimals = mintInfo.decimals ?? 6
 
-        const amtRaw = typeof s.account.amount?.toNumber === "function"
-          ? s.account.amount.toNumber()
-          : Number(s.account.amount || 0)
-        const amountUi = amtRaw / 10 ** decimals
+  const amtRaw = typeof s.account.amount?.toNumber === "function" ? s.account.amount.toNumber() : Number(s.account.amount || 0)
+  if (amtRaw <= 0) continue // hide fully withdrawn stakes [web:163]
 
-        const lastStakeSec = typeof s.account.lastStakeTime?.toNumber === "function"
-          ? s.account.lastStakeTime.toNumber()
-          : Number(s.account.lastStakeTime || 0)
+  const amountUi = amtRaw / 10 ** decimals
 
-        const apyBp = typeof poolAcc.apy?.toNumber === "function"
-          ? poolAcc.apy.toNumber()
-          : Number(poolAcc.apy || 0)
-        const elapsed = Math.max(0, nowSec - lastStakeSec)
-        const rewardRaw = (amtRaw * apyBp * elapsed) / 10000 / SECS_PER_YEAR
-        const rewardUi = rewardRaw / 10 ** decimals
+  const lastStakeSec = typeof s.account.lastStakeTime?.toNumber === "function" ? s.account.lastStakeTime.toNumber() : Number(s.account.lastStakeTime || 0)
 
-        const lockPeriod = typeof poolAcc.lockPeriod?.toNumber === "function"
-          ? poolAcc.lockPeriod.toNumber()
-          : Number(poolAcc.lockPeriod || 0)
-        const unlockSec = label === "locked" ? lastStakeSec + lockPeriod : 0
-        const unlockIn = label === "locked" ? Math.max(0, unlockSec - nowSec) : 0
-        const isLocked = label === "locked" && unlockIn > 0
+  const apyBp = typeof poolAcc.apy?.toNumber === "function" ? poolAcc.apy.toNumber() : Number(poolAcc.apy || 0)
+  const elapsed = Math.max(0, nowSec - lastStakeSec)
+  const rewardRaw = (amtRaw * apyBp * elapsed) / 10000 / (365 * 24 * 60 * 60)
+  const rewardUi = rewardRaw / 10 ** decimals
 
-        const index = typeof s.account.index?.toNumber === "function"
-          ? s.account.index.toNumber()
-          : Number(s.account.index || 0)
+  const lockPeriod = typeof poolAcc.lockPeriod?.toNumber === "function" ? poolAcc.lockPeriod.toNumber() : Number(poolAcc.lockPeriod || 0)
+  const unlockSec = label === "locked" ? lastStakeSec + lockPeriod : 0
+  const unlockIn = label === "locked" ? Math.max(0, unlockSec - nowSec) : 0
+  const isLocked = label === "locked" && unlockIn > 0
 
-        out.push({
-          key: s.publicKey.toBase58(),
-          userStakePda: s.publicKey,
-          poolPda,
-          poolType: label,
-          mint: mintPk,
-          decimals,
-          amountRaw: amtRaw,
-          amountUi,
-          apyBp,
-          lastStake: lastStakeSec ? new Date(lastStakeSec * 1000) : null,
-          rewardUi,
-          unlockIn,
-          unlockAt: unlockSec ? new Date(unlockSec * 1000) : null,
-          isLocked,
-          index,
-        })
-      }
+  const index = typeof s.account.index?.toNumber === "function" ? s.account.index.toNumber() : Number(s.account.index || 0)
+
+  out.push({
+    key: s.publicKey.toBase58(),
+    userStakePda: s.publicKey,
+    poolPda,
+    poolType: label,
+    mint: mintPk,
+    decimals,
+    amountRaw: amtRaw,
+    amountUi,
+    apyBp,
+    lastStake: lastStakeSec ? new Date(lastStakeSec * 1000) : null,
+    rewardUi,
+    unlockIn,
+    unlockAt: unlockSec ? new Date(unlockSec * 1000) : null,
+    isLocked,
+    index,
+  })
+}
+
 
       out.sort((a, b) => {
         if (a.poolType !== b.poolType) return a.poolType.localeCompare(b.poolType)
@@ -130,117 +151,104 @@ export default function UnstakeModal({ open, onClose, walletConnected }) {
     return () => clearInterval(id)
   }, [open, walletConnected, publicKey, fetchAllLots])
 
-const handleUnstake = useCallback(async () => {
-  setError("")
-  setTxSig("")
-  if (!walletConnected || !publicKey) { setError("Please connect wallet"); return } // [web:68]
-  if (!selected) { setError("Select a stake entry"); return } // lot chosen row
-  const amt = Number(amount)
-  if (!(amt > 0)) { setError("Amount must be greater than 0"); return } // guard [web:68]
-  if (amt > selected.amountUi + 1e-12) { setError(`Max: ${selected.amountUi.toFixed(selected.decimals)}`); return } // clamp [web:68]
-  if (selected.isLocked) { setError("Tokens are still locked - withdrawal not allowed yet"); return } // lock check [web:68]
+  const handleUnstake = useCallback(async () => {
+    setError("")
+    setTxSig("")
+    if (!walletConnected || !publicKey) { setError("Please connect wallet"); return } // [web:68]
+    if (!selected) { setError("Select a stake entry"); return }
+    const amt = Number(amount)
+    if (!(amt > 0)) { setError("Amount must be greater than 0"); return }
+    if (amt > selected.amountUi + 1e-12) { setError(`Max: ${selected.amountUi.toFixed(selected.decimals)}`); return }
+    if (selected.isLocked) { setError("Tokens are still locked - withdrawal not allowed yet"); return } // [web:68]
 
-  setLoading(true)
-  try {
-    const {
-      getAssociatedTokenAddress,
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      TOKEN_PROGRAM_ID,
-    } = await import("@solana/spl-token")
+    setLoading(true)
+    try {
+      const { getAssociatedTokenAddress, ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID } =
+        await import("@solana/spl-token")
 
-    // Re-derive expected lot PDA from seeds and compare with selected.userStakePda
-    const seedBuf = selected.poolType === "locked" ? Buffer.from("locked") : Buffer.from("flexible")
-    const idxLE = new Uint8Array(8); new DataView(idxLE.buffer).setBigInt64(0, BigInt(selected.index), true)
-    const [expectedUserStake] = PublicKey.findProgramAddressSync(
-      [Buffer.from("user"), publicKey.toBuffer(), seedBuf, Buffer.from(idxLE)],
-      program.programId
-    ) // [web:389]
-    if (expectedUserStake.toBase58() !== selected.userStakePda.toBase58()) {
-      setError("Internal mismatch: lot reference changed. Refresh and try again.")
+      // Recompute expected userStake PDA from seeds and index (defensive)
+    const poolSeed = selected.poolType === "locked" ? SEED_LOCK : SEED_FLEX
+const idxLE = new Uint8Array(8)
+new DataView(idxLE.buffer).setBigInt64(0, BigInt(selected.index || 0), true) // i64 LE [web:68]
+const [expectedUserStake] = PublicKey.findProgramAddressSync(
+  [SEED_USER, publicKey.toBuffer(), poolSeed, idxLE],
+  program.programId
+)
+
+      if (expectedUserStake.toBase58() !== selected.userStakePda.toBase58()) {
+        setError("Lot reference changed. Refresh and retry.")
+        setLoading(false)
+        return
+      }
+
+      const poolPda = selected.poolPda
+      const mint = selected.mint
+
+      // ATAs under same token program family used by mint
+      const userTokenAccount = await getAssociatedTokenAddress(mint, publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID) // [web:386]
+      const tokenVault = await getAssociatedTokenAddress(mint, poolPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID) // [web:386]
+      const adminTokenAccount = await getAssociatedTokenAddress(mint, ADMIN_OWNER, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID) // [web:386]
+
+      // Strict BN usage for both arguments to avoid toTwos issues
+      const mult = 10 ** selected.decimals
+      const withdrawAmountRaw = new BN((amt * mult).toFixed(0)) // BN u64 [web:411]
+      const indexBN = new BN(selected.index) // BN i64 [web:411]
+
+      const ix = await program.methods
+        .withdraw(withdrawAmountRaw, indexBN)
+        .accounts({
+          user: publicKey,
+          pool: poolPda,
+          userStake: expectedUserStake,
+          mint,
+          userTokenAccount,
+          tokenVault,
+          adminTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction() // [web:68]
+
+      const tx = new Transaction().add(ix)
+      const { signature } = await sendAndConfirmOnce(connection, tx, publicKey) // robust, single-send [web:420]
+      setTxSig(signature)
+
+      await fetchAllLots()
+      setAmount("")
+      setSelected(null)
+    } catch (e) {
+      console.error("Unstake error:", e)
+      const msg = e?.message || String(e)
+      if (msg.includes("already been processed")) {
+        setTxSig(prev => prev || "Processed") // treat as success if earlier branch set it
+      } else if (msg.includes("ConstraintSeeds")) setError("Lot changed or index mismatch. Refresh and retry.") // [web:388]
+      else if (msg.includes("StillLocked")) setError("Tokens are still locked - withdrawal not allowed yet") // [web:68]
+      else if (msg.includes("InsufficientStake")) setError("Insufficient staked amount") // [web:68]
+      else if (msg.includes("AmountTooSmall")) setError("Withdrawal amount too small") // [web:68]
+      else if (msg.includes("User rejected")) setError("Transaction cancelled by user") // [web:68]
+      else setError(`Withdrawal failed: ${msg}`) // [web:68]
+    } finally {
       setLoading(false)
-      return
     }
-
-    const poolPda = selected.poolPda
-    const mint = selected.mint
-
-    // ATAs
-    const userTokenAccount = await getAssociatedTokenAddress(
-      mint, publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-    ) // [web:386]
-    const tokenVault = await getAssociatedTokenAddress(
-      mint, poolPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-    ) // [web:386]
-    const adminTokenAccount = await getAssociatedTokenAddress(
-      mint, ADMIN_OWNER, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-    ) // [web:386]
-
-    // Convert amount to base units
-   // encode amount as BN from integer string
-const mult = 10 ** selected.decimals
-const withdrawAmountRaw = new BN((Number(amount) * mult).toFixed(0)) // BN u64 [web:411]
-
-// also pass index as BN (i64) to match test script compatibility
-const indexBN = new BN(selected.index) // BN i64 [web:411]
-
-// Build ix: withdraw(amount: u64, stake_index: i64)
-const ix = await program.methods
-  .withdraw(withdrawAmountRaw, indexBN)
-  .accounts({
-    user: publicKey,
-    pool: selected.poolPda,
-    userStake: selected.userStakePda,
-    mint: selected.mint,
-    userTokenAccount,
-    tokenVault,
-    adminTokenAccount,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  })
-  .instruction()
-
-
-    const { blockhash } = await connection.getLatestBlockhash()
-    const tx = new Transaction({ recentBlockhash: blockhash, feePayer: publicKey }).add(ix)
-    const signed = await window.solana.signTransaction(tx)
-    const sig = await connection.sendRawTransaction(signed.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: "confirmed",
-    })
-    await connection.confirmTransaction(sig, "confirmed")
-    setTxSig(sig)
-
-    await fetchAllLots()
-    setAmount("")
-    setSelected(null)
-  } catch (e) {
-    console.error("Unstake error:", e)
-    const msg = e?.message || String(e)
-    if (msg.includes("ConstraintSeeds")) setError("Lot changed or index mismatch. Refresh and retry.") // [web:388]
-    else if (msg.includes("StillLocked")) setError("Tokens are still locked - withdrawal not allowed yet") // [web:68]
-    else if (msg.includes("InsufficientStake")) setError("Insufficient staked amount") // [web:68]
-    else if (msg.includes("AmountTooSmall")) setError("Withdrawal amount too small") // [web:68]
-    else if (msg.includes("User rejected")) setError("Transaction cancelled by user") // [web:68]
-    else setError(`Withdrawal failed: ${msg}`) // [web:68]
-  } finally {
-    setLoading(false)
-  }
-}, [walletConnected, publicKey, selected, amount, fetchAllLots])
-
+  }, [walletConnected, publicKey, selected, amount, fetchAllLots])
 
   if (!open) return null
 
   const filtered = lots.filter((l) => l.poolType === activePoolTab)
 
   return (
-    <div
-      className="modal-overlay"
-      style={{
-        position: "fixed", inset: 0,
-        background: "var(--bg-red-darker)", // solid, not transparent
-        zIndex: 1000,
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}
-    >
+  <div
+  className="modal-overlay"
+  style={{
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.7)",  // translucent backdrop [web:446]
+    zIndex: 1000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  }}
+>
+
       <div
         className="card"
         style={{
@@ -252,7 +260,6 @@ const ix = await program.methods
           overflow: "hidden",
         }}
       >
-        {/* Loading overlay */}
         {loading && (
           <div
             style={{
