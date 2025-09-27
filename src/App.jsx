@@ -1,4 +1,5 @@
 import React, { useState } from "react"
+import { Routes, Route, Link, Navigate } from "react-router-dom"
 import Hero from "./components/Hero.jsx"
 import MemeBox from "./components/MemeBox.jsx"
 import Clicker from "./components/Clicker.jsx"
@@ -6,17 +7,16 @@ import StatsRef from "./components/StatsRef.jsx"
 import Pools from "./components/Pools.jsx"
 import Socials from "./components/Socials.jsx"
 import StakeModal from "./components/StakeModal.jsx"
-import UnstakeModal from "./components/UnstakeModal"
+import UnstakeModal from "./components/UnstakeModal.jsx"
+import McStakeInitializer from "./components/McStakeInitializer.jsx"
 
-export default function App() {
-  // Remove local wallet management; rely on StatsRef
+function DappHome() {
   const [walletConnected, setWalletConnected] = useState(false)
   const [walletAddress, setWalletAddress] = useState("")
   const [showStakeModal, setShowStakeModal] = useState(false)
   const [showUnstakeModal, setShowUnstakeModal] = useState(false)
   const [selectedPoolType, setSelectedPoolType] = useState("flexible")
 
-  // Receive wallet status updates from StatsRef
   const handleWalletUpdate = ({ connected, address }) => {
     setWalletConnected(connected)
     setWalletAddress(address || "")
@@ -43,17 +43,19 @@ export default function App() {
               McFarmerz <span className="badge">degen APY farm</span>
             </h1>
             <p className="subtitle">
-              Get hired today — click, stake, and fry your way up.
+              Get hired today — click, stake, and fry the way up.
             </p>
           </div>
         </div>
+
         <Socials />
-        {/* {!walletConnected ? (
-          // Header button now triggers StatsRef via a custom event
-          <button
-            className="btn connect-btn"
-            onClick={() => window.dispatchEvent(new CustomEvent("mc-connect-wallet"))}
-          >
+
+        {/* Quick link to initializer page */}
+        <Link className="btn ghost" to="/init">Init Pools</Link>
+
+        {/* Example header wallet UI driven by StatsRef events
+        {!walletConnected ? (
+          <button className="btn connect-btn" onClick={() => window.dispatchEvent(new CustomEvent("mc-connect-wallet"))}>
             Connect Wallet
           </button>
         ) : (
@@ -61,10 +63,7 @@ export default function App() {
             <span className="wallet-address">
               {walletAddress.slice(0, 4)}...{walletAddress.slice(-4)}
             </span>
-            <button
-              className="btn disconnect-btn"
-              onClick={() => window.dispatchEvent(new CustomEvent("mc-disconnect-wallet"))}
-            >
+            <button className="btn disconnect-btn" onClick={() => window.dispatchEvent(new CustomEvent("mc-disconnect-wallet"))}>
               Disconnect
             </button>
           </div>
@@ -76,7 +75,6 @@ export default function App() {
 
       <main className="grid">
         <Clicker />
-        {/* StatsRef owns the wallet logic and informs App */}
         <StatsRef onWalletChange={handleWalletUpdate} />
       </main>
 
@@ -102,5 +100,24 @@ export default function App() {
         poolType={selectedPoolType}
       />
     </div>
+  )
+}
+
+export default function App() {
+  return (
+    <>
+      {/* Optional top-level nav for switching pages */}
+      {/* <nav style={{ padding: 10 }}>
+        <Link to="/" style={{ marginRight: 10 }}>Home</Link>
+        <Link to="/init">Initializer</Link>
+      </nav> */}
+
+      <Routes>
+        <Route path="/" element={<DappHome />} />
+        <Route path="/init" element={<McStakeInitializer />} />
+        {/* Redirect unknown paths to home */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   )
 }

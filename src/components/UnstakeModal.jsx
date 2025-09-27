@@ -1,588 +1,403 @@
-import React, { useState, useEffect } from "react"
-import { PublicKey, Transaction, SystemProgram } from "@solana/web3.js"
+import React, { useEffect, useMemo, useState, useCallback } from "react"
+import { PublicKey, Transaction } from "@solana/web3.js"
 import { BN } from "@coral-xyz/anchor"
 import { Buffer } from "buffer"
 import "../Styles.css"
-import { connection, program, getAccountData } from "../anchor/setup"
+import { connection, program } from "../anchor/setup"
 
-export default function UnstakeModal({
-  open,
-  onClose,
-  walletConnected,
-  poolType = "flexible",
-}) {
-  const [amount, setAmount] = useState("")
-  const [loading, setLoading] = useState(false)
-  const [txSig, setTxSig] = useState("")
-  const [error, setError] = useState("")
-  const [accountData, setAccountData] = useState(null)
+const SEED_USER = Buffer.from("user")
+const SEED_POOL = Buffer.from("pool")
+const SEED_FLEX = Buffer.from("flexible")
+const SEED_LOCK = Buffer.from("locked")
+const ADMIN_OWNER = new PublicKey("GdLfQn7SkU2MCH4vH1Q7cY8q3feHwhRFGJjHXNkRK3hS")
+const SECS_PER_YEAR = 365 * 24 * 60 * 60
+
+export default function UnstakeModal({ open, onClose, walletConnected }) {
   const [publicKey, setPublicKey] = useState(null)
-  const [userStakeData, setUserStakeData] = useState(null)
-  const [tokenDecimals, setTokenDecimals] = useState(6)
-  const [maxWithdrawable, setMaxWithdrawable] = useState(0)
+  const [lots, setLots] = useState([])
+  const [activePoolTab, setActivePoolTab] = useState("flexible")
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
+  const [txSig, setTxSig] = useState("")
+  const [amount, setAmount] = useState("")
+  const [selected, setSelected] = useState(null)
 
-  // Get wallet public key and account data when wallet is connected
+  const nowSec = useMemo(() => Math.floor(Date.now() / 1000), [])
+
   useEffect(() => {
-    const fetchData = async () => {
-      if (walletConnected && window.solana) {
-        try {
-          // Get public key
-          const pk = window.solana.publicKey
-          setPublicKey(pk)
+    if (!open || !walletConnected || !window.solana?.publicKey) return
+    setPublicKey(window.solana.publicKey)
+  }, [open, walletConnected])
 
-          // Fetch account data
-          const data = await getAccountData()
-          setAccountData(data)
-
-          // Fetch user stake data for current pool type
-          await fetchUserStakeData(pk, poolType, data)
-
-          console.log("Account Data:", data)
-        } catch (error) {
-          console.error("Error fetching data:", error)
-        }
-      }
-    }
-
-    if (open && walletConnected) {
-      fetchData()
-    }
-  }, [open, walletConnected, poolType])
-
-  const fetchUserStakeData = async (
-    userPublicKey,
-    currentPoolType,
-    accountData
-  ) => {
-    try {
-      // Derive user stake PDA
-      const [userStakePda] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("user"),
-          userPublicKey.toBuffer(),
-          Buffer.from(currentPoolType),
-        ],
-        program.programId
-      )
-
-      // Fetch user stake account
-      const userStakeAccount = await program.account.userStake.fetch(
-        userStakePda
-      )
-
-      // Find matching pool for token decimals
-      const matchingPool = accountData?.pools?.find((pool) => {
-        const accountPoolType = pool.account.poolType
-        if (currentPoolType === "flexible") {
-          return accountPoolType.flexible !== undefined
-        } else if (currentPoolType === "locked") {
-          return accountPoolType.locked !== undefined
-        }
-        return false
-      })
-
-      if (matchingPool) {
-        // Get token decimals
-        const { getMint } = await import("@solana/spl-token")
-        const mint = matchingPool.account.mint
-
-        try {
-          const mintInfo = await getMint(connection, mint)
-          setTokenDecimals(mintInfo.decimals)
-        } catch (err) {
-          console.warn(
-            "Failed to fetch token decimals, using default (6):",
-            err
-          )
-        }
-
-        // Calculate max withdrawable amount
-        const stakeAmount = userStakeAccount.amount.toNumber()
-        const decimalsMultiplier = Math.pow(10, tokenDecimals)
-        setMaxWithdrawable(stakeAmount / decimalsMultiplier)
-
-        setUserStakeData({
-          ...userStakeAccount,
-          stakedAmount: stakeAmount / decimalsMultiplier,
-          lastStakeTime: new Date(
-            userStakeAccount.lastStakeTime.toNumber() * 1000
-          ),
-        })
-      }
-    } catch (error) {
-      console.log("No stake found for this pool type:", error)
-      setUserStakeData(null)
-      setMaxWithdrawable(0)
-    }
+  const derivePoolPda = (label) => {
+    const seed = label === "locked" ? SEED_LOCK : SEED_FLEX
+    const [pda] = PublicKey.findProgramAddressSync([SEED_POOL, seed], program.programId)
+    return pda
   }
 
-  const handleUnstake = async () => {
-    if (!walletConnected || !publicKey || !amount) {
-      setError("Please connect wallet and enter amount")
-      return
-    }
-
-    if (parseFloat(amount) <= 0) {
-      setError("Amount must be greater than 0")
-      return
-    }
-
-    if (parseFloat(amount) > maxWithdrawable) {
-      setError(`Maximum withdrawable: ${maxWithdrawable} tokens`)
-      return
-    }
-
-    setLoading(true)
+  const fetchAllLots = useCallback(async () => {
+    if (!publicKey) return
     setError("")
-    setTxSig("")
-
+    setLoading(true)
     try {
-      // Find the matching pool
-      const matchingPool = accountData?.pools?.find((pool) => {
-        const accountPoolType = pool.account.poolType
-        if (poolType === "flexible") {
-          return accountPoolType.flexible !== undefined
-        } else if (poolType === "locked") {
-          return accountPoolType.locked !== undefined
-        }
-        return false
-      })
+      const userStakes = await program.account.userStake.all([
+        { memcmp: { offset: 8, bytes: publicKey.toBase58() } },
+      ]) // [web:68]
 
-      if (!matchingPool) {
-        setError(`${poolType} pool not found`)
-        return
-      }
+      const out = []
+      const { getMint } = await import("@solana/spl-token")
 
-      const mint = matchingPool.account.mint
+      for (const s of userStakes) {
+        const label = s.account.poolType?.locked !== undefined ? "locked" : "flexible"
+        const poolPda = derivePoolPda(label)
 
-      // Derive PDAs
-      const [poolPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("pool"), Buffer.from(poolType)],
-        program.programId
-      )
+        let poolAcc = null
+        try { poolAcc = await program.account.pool.fetch(poolPda) } catch {}
+        if (!poolAcc) continue
 
-      const [userStakePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("user"), publicKey.toBuffer(), Buffer.from(poolType)],
-        program.programId
-      )
+        const mintPk = new PublicKey(poolAcc.mint)
+        const mintInfo = await getMint(connection, mintPk).catch(() => ({ decimals: 6 }))
+        const decimals = mintInfo.decimals ?? 6
 
-      const {
-        getAssociatedTokenAddress,
-        ASSOCIATED_TOKEN_PROGRAM_ID,
-        TOKEN_PROGRAM_ID,
-      } = await import("@solana/spl-token")
+        const amtRaw = typeof s.account.amount?.toNumber === "function"
+          ? s.account.amount.toNumber()
+          : Number(s.account.amount || 0)
+        const amountUi = amtRaw / 10 ** decimals
 
-      // Get token accounts
-      const userTokenAccount = await getAssociatedTokenAddress(
-        mint,
-        publicKey,
-        false,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      )
+        const lastStakeSec = typeof s.account.lastStakeTime?.toNumber === "function"
+          ? s.account.lastStakeTime.toNumber()
+          : Number(s.account.lastStakeTime || 0)
 
-      const tokenVault = await getAssociatedTokenAddress(
-        mint,
-        poolPda,
-        true,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      )
+        const apyBp = typeof poolAcc.apy?.toNumber === "function"
+          ? poolAcc.apy.toNumber()
+          : Number(poolAcc.apy || 0)
+        const elapsed = Math.max(0, nowSec - lastStakeSec)
+        const rewardRaw = (amtRaw * apyBp * elapsed) / 10000 / SECS_PER_YEAR
+        const rewardUi = rewardRaw / 10 ** decimals
 
-      const adminTokenAccount = await getAssociatedTokenAddress(
-        mint,
-        new PublicKey("GdLfQn7SkU2MCH4vH1Q7cY8q3feHwhRFGJjHXNkRK3hS"),
-        false,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      )
+        const lockPeriod = typeof poolAcc.lockPeriod?.toNumber === "function"
+          ? poolAcc.lockPeriod.toNumber()
+          : Number(poolAcc.lockPeriod || 0)
+        const unlockSec = label === "locked" ? lastStakeSec + lockPeriod : 0
+        const unlockIn = label === "locked" ? Math.max(0, unlockSec - nowSec) : 0
+        const isLocked = label === "locked" && unlockIn > 0
 
-      // Convert amount to token units
-      const tokenMultiplier = Math.pow(10, tokenDecimals)
-      const withdrawAmount = new BN(parseFloat(amount) * tokenMultiplier)
+        const index = typeof s.account.index?.toNumber === "function"
+          ? s.account.index.toNumber()
+          : Number(s.account.index || 0)
 
-      console.log("Withdraw calculation:", {
-        inputAmount: amount,
-        tokenDecimals,
-        tokenMultiplier,
-        finalWithdrawAmount: withdrawAmount.toString(),
-      })
-
-      // Create withdraw instruction
-      const instruction = await program.methods
-        .withdraw(withdrawAmount)
-        .accounts({
-          user: publicKey,
-          pool: poolPda,
-          userStake: userStakePda,
-          mint: mint,
-          userTokenAccount: userTokenAccount,
-          tokenVault: tokenVault,
-          adminTokenAccount: adminTokenAccount,
-          tokenProgram: TOKEN_PROGRAM_ID,
+        out.push({
+          key: s.publicKey.toBase58(),
+          userStakePda: s.publicKey,
+          poolPda,
+          poolType: label,
+          mint: mintPk,
+          decimals,
+          amountRaw: amtRaw,
+          amountUi,
+          apyBp,
+          lastStake: lastStakeSec ? new Date(lastStakeSec * 1000) : null,
+          rewardUi,
+          unlockIn,
+          unlockAt: unlockSec ? new Date(unlockSec * 1000) : null,
+          isLocked,
+          index,
         })
-        .instruction()
-
-      // Create and send transaction
-      const transaction = new Transaction().add(instruction)
-      const { blockhash } = await connection.getLatestBlockhash()
-      transaction.recentBlockhash = blockhash
-      transaction.feePayer = publicKey
-
-      // Sign transaction with wallet
-      const signedTransaction = await window.solana.signTransaction(transaction)
-
-      // Send transaction
-      const signature = await connection.sendRawTransaction(
-        signedTransaction.serialize(),
-        {
-          skipPreflight: false,
-          preflightCommitment: "confirmed",
-        }
-      )
-
-      // Confirm transaction
-      await connection.confirmTransaction(signature, "confirmed")
-      alert("Unstake successful!")
-      setTxSig(signature)
-      setAmount("")
-
-      // Refresh data after successful withdrawal
-      const updatedData = await getAccountData()
-      setAccountData(updatedData)
-      await fetchUserStakeData(publicKey, poolType, updatedData)
-
-      // Auto-close after 3 seconds
-      setTimeout(() => {
-        onClose()
-        setTxSig("")
-      }, 3000)
-    } catch (err) {
-      console.error("Withdrawal error:", err)
-       alert(`Unstake failed: ${err.message}`)
-      if (err.message.includes("User rejected")) {
-        setError("Transaction cancelled by user")
-      } else if (err.message.includes("StillLocked")) {
-        setError("Tokens are still locked - withdrawal not allowed yet")
-      } else if (err.message.includes("InsufficientStake")) {
-        setError("Insufficient staked amount")
-      } else if (err.message.includes("AmountTooSmall")) {
-        setError("Withdrawal amount too small")
-      } else {
-        setError(`Withdrawal failed: ${err.message}`)
       }
+
+      out.sort((a, b) => {
+        if (a.poolType !== b.poolType) return a.poolType.localeCompare(b.poolType)
+        if (a.poolType === "locked") return a.unlockIn - b.unlockIn
+        return (b.lastStake?.getTime?.() || 0) - (a.lastStake?.getTime?.() || 0)
+      })
+
+      setLots(out)
+      setSelected(null)
+      setAmount("")
+      setTxSig("")
+    } catch (e) {
+      console.error("fetchAllLots error:", e)
+      setLots([])
     } finally {
       setLoading(false)
     }
-  }
+  }, [publicKey, nowSec])
 
-  const handleClose = () => {
-    if (!loading) {
-      setError("")
-      setTxSig("")
-      onClose()
+  useEffect(() => {
+    if (!open || !walletConnected || !publicKey) return
+    fetchAllLots()
+    const id = setInterval(() => fetchAllLots(), 30000)
+    return () => clearInterval(id)
+  }, [open, walletConnected, publicKey, fetchAllLots])
+
+const handleUnstake = useCallback(async () => {
+  setError("")
+  setTxSig("")
+  if (!walletConnected || !publicKey) { setError("Please connect wallet"); return } // [web:68]
+  if (!selected) { setError("Select a stake entry"); return } // lot chosen row
+  const amt = Number(amount)
+  if (!(amt > 0)) { setError("Amount must be greater than 0"); return } // guard [web:68]
+  if (amt > selected.amountUi + 1e-12) { setError(`Max: ${selected.amountUi.toFixed(selected.decimals)}`); return } // clamp [web:68]
+  if (selected.isLocked) { setError("Tokens are still locked - withdrawal not allowed yet"); return } // lock check [web:68]
+
+  setLoading(true)
+  try {
+    const {
+      getAssociatedTokenAddress,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+      TOKEN_PROGRAM_ID,
+    } = await import("@solana/spl-token")
+
+    // Re-derive expected lot PDA from seeds and compare with selected.userStakePda
+    const seedBuf = selected.poolType === "locked" ? Buffer.from("locked") : Buffer.from("flexible")
+    const idxLE = new Uint8Array(8); new DataView(idxLE.buffer).setBigInt64(0, BigInt(selected.index), true)
+    const [expectedUserStake] = PublicKey.findProgramAddressSync(
+      [Buffer.from("user"), publicKey.toBuffer(), seedBuf, Buffer.from(idxLE)],
+      program.programId
+    ) // [web:389]
+    if (expectedUserStake.toBase58() !== selected.userStakePda.toBase58()) {
+      setError("Internal mismatch: lot reference changed. Refresh and try again.")
+      setLoading(false)
+      return
     }
-  }
 
-  const setMaxAmount = () => {
-    setAmount(maxWithdrawable.toString())
+    const poolPda = selected.poolPda
+    const mint = selected.mint
+
+    // ATAs
+    const userTokenAccount = await getAssociatedTokenAddress(
+      mint, publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+    ) // [web:386]
+    const tokenVault = await getAssociatedTokenAddress(
+      mint, poolPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+    ) // [web:386]
+    const adminTokenAccount = await getAssociatedTokenAddress(
+      mint, ADMIN_OWNER, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+    ) // [web:386]
+
+    // Convert amount to base units
+   // encode amount as BN from integer string
+const mult = 10 ** selected.decimals
+const withdrawAmountRaw = new BN((Number(amount) * mult).toFixed(0)) // BN u64 [web:411]
+
+// also pass index as BN (i64) to match test script compatibility
+const indexBN = new BN(selected.index) // BN i64 [web:411]
+
+// Build ix: withdraw(amount: u64, stake_index: i64)
+const ix = await program.methods
+  .withdraw(withdrawAmountRaw, indexBN)
+  .accounts({
+    user: publicKey,
+    pool: selected.poolPda,
+    userStake: selected.userStakePda,
+    mint: selected.mint,
+    userTokenAccount,
+    tokenVault,
+    adminTokenAccount,
+    tokenProgram: TOKEN_PROGRAM_ID,
+  })
+  .instruction()
+
+
+    const { blockhash } = await connection.getLatestBlockhash()
+    const tx = new Transaction({ recentBlockhash: blockhash, feePayer: publicKey }).add(ix)
+    const signed = await window.solana.signTransaction(tx)
+    const sig = await connection.sendRawTransaction(signed.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+    })
+    await connection.confirmTransaction(sig, "confirmed")
+    setTxSig(sig)
+
+    await fetchAllLots()
+    setAmount("")
+    setSelected(null)
+  } catch (e) {
+    console.error("Unstake error:", e)
+    const msg = e?.message || String(e)
+    if (msg.includes("ConstraintSeeds")) setError("Lot changed or index mismatch. Refresh and retry.") // [web:388]
+    else if (msg.includes("StillLocked")) setError("Tokens are still locked - withdrawal not allowed yet") // [web:68]
+    else if (msg.includes("InsufficientStake")) setError("Insufficient staked amount") // [web:68]
+    else if (msg.includes("AmountTooSmall")) setError("Withdrawal amount too small") // [web:68]
+    else if (msg.includes("User rejected")) setError("Transaction cancelled by user") // [web:68]
+    else setError(`Withdrawal failed: ${msg}`) // [web:68]
+  } finally {
+    setLoading(false)
   }
+}, [walletConnected, publicKey, selected, amount, fetchAllLots])
+
 
   if (!open) return null
+
+  const filtered = lots.filter((l) => l.poolType === activePoolTab)
 
   return (
     <div
       className="modal-overlay"
       style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        background: "rgba(228,28,35,0.85)",
+        position: "fixed", inset: 0,
+        background: "var(--bg-red-darker)", // solid, not transparent
         zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center",
       }}
     >
       <div
         className="card"
         style={{
-          minWidth: 340,
-          maxWidth: 400,
-          borderRadius: "22px",
-          border: "var(--border-thick)",
-          background:
-            "linear-gradient(180deg, var(--bg-red-dark), var(--bg-red-darker))",
-          boxShadow:
-            "0 18px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05)",
+          position: "relative",
+          minWidth: 360, maxWidth: 520,
+          borderRadius: 22, border: "var(--border-thick)",
+          background: "linear-gradient(180deg, var(--bg-red-dark), var(--bg-red-darker))",
+          boxShadow: "0 18px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05)",
+          overflow: "hidden",
         }}
       >
-        <h2
-          style={{
-            margin: "0 0 18px",
-            fontSize: "22px",
-            fontWeight: 900,
-            color: "var(--gold)",
-          }}
-        >
-          Unstake Tokens
-        </h2>
-
-        {/* User Stake Info */}
-        {walletConnected && userStakeData && (
+        {/* Loading overlay */}
+        {loading && (
           <div
             style={{
-              background: "rgba(255,215,0,0.1)",
-              padding: "12px",
-              borderRadius: "8px",
-              marginBottom: "12px",
-              border: "1px solid rgba(255,215,0,0.2)",
+              position: "absolute", inset: 0,
+              background: "rgba(0,0,0,0.4)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              zIndex: 5,
             }}
           >
-            <div
+            <div className="spinner" />
+            <span style={{ marginLeft: 10, color: "white", fontWeight: 700 }}>Loading...</span>
+          </div>
+        )}
+
+        <h2 style={{ margin: "12px 12px 8px", fontSize: 22, fontWeight: 900, color: "var(--gold)" }}>Your Stakes</h2>
+
+        <div style={{ display: "flex", gap: 8, margin: "0 12px 12px" }}>
+          {["flexible", "locked"].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => { if (!loading) { setActivePoolTab(tab); setSelected(null); setAmount(""); setError("") } }}
+              className="btn"
               style={{
-                fontSize: "14px",
-                color: "var(--gold)",
-                marginBottom: "4px",
+                flex: 1, fontWeight: 800,
+                background: activePoolTab === tab ? "var(--gold)" : "transparent",
+                color: activePoolTab === tab ? "black" : "var(--text)",
+                borderColor: activePoolTab === tab ? "var(--gold)" : "var(--border)",
               }}
+              disabled={loading}
             >
-              📊 Your Stake ({poolType})
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-              Staked: {userStakeData.stakedAmount.toFixed(6)} tokens
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-              Last Stake: {userStakeData.lastStakeTime.toLocaleDateString()}
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-              Available: {maxWithdrawable.toFixed(6)} tokens
-            </div>
-          </div>
-        )}
+              {tab === "flexible" ? "Flexible" : "Locked"}
+            </button>
+          ))}
+        </div>
 
-        {!userStakeData && walletConnected && (
-          <div
-            style={{
-              background: "rgba(244,67,54,0.1)",
-              padding: "12px",
-              borderRadius: "8px",
-              marginBottom: "12px",
-              border: "1px solid rgba(244,67,54,0.2)",
-            }}
-          >
-            <div style={{ fontSize: "14px", color: "var(--red-accent)" }}>
-              No stake found in {poolType} pool
+        <div style={{ margin: "0 12px 12px", maxHeight: 320, overflowY: "auto" }}>
+          {filtered.length === 0 ? (
+            <div className="small" style={{ color: "var(--muted)", textAlign: "center", padding: 12, background: "rgba(255,255,255,0.04)", borderRadius: 10, border: "1px solid rgba(255,255,255,0.1)" }}>
+              No stakes in this pool
             </div>
-          </div>
-        )}
+          ) : (
+            filtered.map((p) => {
+              const isSel = selected?.key === p.key
+              const unlockLabel =
+                p.poolType === "locked"
+                  ? p.isLocked
+                    ? `Unlocks on ${p.unlockAt?.toLocaleString?.() || "-"}`
+                    : "Unlocked"
+                  : "Flexible"
+              return (
+                <div
+                  key={p.key}
+                  onClick={() => { if (!loading) { setSelected(p); setAmount(""); setError("") } }}
+                  style={{
+                    cursor: loading ? "not-allowed" : "pointer",
+                    padding: 10, marginBottom: 8, borderRadius: 10,
+                    border: isSel ? "1px solid var(--gold)" : "1px solid rgba(255,255,255,0.1)",
+                    background: isSel ? "rgba(255,215,0,0.08)" : "rgba(255,255,255,0.04)",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                    <span style={{ color: "var(--gold)" }}>
+                      {p.poolType === "locked" ? "Locked" : "Flexible"} • index {p.index}
+                    </span>
+                    <span style={{ color: "var(--muted)" }}>{unlockLabel}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
+                    <span className="muted">Staked</span>
+                    <span>{p.amountUi.toFixed(6)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, fontSize: 12 }}>
+                    <span className="muted">Accrued reward</span>
+                    <span>{p.rewardUi.toFixed(6)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, fontSize: 12 }}>
+                    <span className="muted">Last stake</span>
+                    <span>{p.lastStake ? p.lastStake.toLocaleString() : "-"}</span>
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
 
-        <div style={{ marginBottom: 18 }}>
-          <label
-            style={{ display: "block", marginBottom: 12, fontWeight: 500 }}
-          >
-            <span style={{ color: "var(--muted)" }}>Withdrawal Amount</span>
-            <div style={{ position: "relative" }}>
-              <input
-                type="number"
-                min="0"
-                step="0.000001"
-                value={amount}
-                onChange={(e) => {
-                  setAmount(e.target.value)
-                  setError("")
-                }}
-                disabled={loading || !userStakeData}
-                style={{
-                  width: "100%",
-                  marginTop: 8,
-                  padding: "12px",
-                  paddingRight: "60px",
-                  borderRadius: "14px",
-                  border: "var(--border-thin)",
-                  background: "rgba(255,255,255,.06)",
-                  color: "var(--text)",
-                  fontWeight: 700,
-                  fontSize: "16px",
-                }}
-                placeholder={
-                  userStakeData ? `Max: ${maxWithdrawable.toFixed(6)}` : "0"
-                }
-              />
-              {userStakeData && (
+        {!!selected && (
+          <div style={{ margin: "0 12px 12px" }}>
+            <label className="small" style={{ display: "block", marginBottom: 8 }}>
+              Withdrawal Amount
+              <div style={{ position: "relative" }}>
+                <input
+                  type="number" min="0" step="0.000001"
+                  value={amount}
+                  onChange={(e) => { setAmount(e.target.value); setError("") }}
+                  disabled={loading}
+                  className="mcstake-input"
+                  placeholder={`Max: ${selected.amountUi.toFixed(6)}`}
+                />
                 <button
-                  onClick={setMaxAmount}
+                  onClick={() => setAmount(selected.amountUi.toString())}
                   disabled={loading}
                   style={{
-                    position: "absolute",
-                    right: "8px",
-                    top: "50%",
-                    transform: "translateY(-50%)",
-                    background: "var(--gold)",
-                    color: "black",
-                    border: "none",
-                    borderRadius: "6px",
-                    padding: "4px 8px",
-                    fontSize: "11px",
-                    fontWeight: "700",
-                    cursor: loading ? "not-allowed" : "pointer",
+                    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                    background: "var(--gold)", color: "black", border: "none", borderRadius: 6, padding: "4px 8px", fontSize: 11, fontWeight: 700,
                   }}
                 >
                   MAX
                 </button>
-              )}
-            </div>
-          </label>
+              </div>
+            </label>
 
-          {/* Pool info and fees */}
-          <div
-            style={{
-              background: "rgba(244,67,54,0.1)",
-              padding: "12px",
-              borderRadius: "10px",
-              border: "1px solid rgba(244,67,54,0.3)",
-              marginBottom: "12px",
-            }}
-          >
-            <div
-              style={{
-                color: "var(--red-accent)",
-                fontSize: "14px",
-                fontWeight: 600,
-              }}
-            >
-              ⚠️ Withdrawal Fees
-            </div>
-            <div
-              style={{
-                color: "var(--muted)",
-                fontSize: "12px",
-                marginTop: "4px",
-              }}
-            >
-              10% unstake fee will be deducted
-            </div>
-            {poolType === "locked" && (
-              <div
-                style={{
-                  color: "var(--muted)",
-                  fontSize: "11px",
-                  marginTop: "4px",
-                }}
-              >
-                🔒 Locked pool: 7-day minimum lock period
+            {selected.poolType === "locked" && (
+              <div className="small" style={{ color: selected.isLocked ? "var(--red-accent)" : "var(--muted)", marginBottom: 8 }}>
+                {selected.isLocked ? `🔒 Unstake available on ${selected.unlockAt?.toLocaleString?.() || "-"}` : "Unlocked"}
               </div>
             )}
-          </div>
-        </div>
-
-        {!walletConnected && (
-          <div
-            className="small"
-            style={{
-              color: "var(--red-accent)",
-              marginBottom: 12,
-              textAlign: "center",
-              background: "rgba(244,67,54,0.1)",
-              padding: "8px",
-              borderRadius: "8px",
-            }}
-          >
-            🔒 Please connect your wallet to unstake.
           </div>
         )}
 
         {error && (
-          <div
-            className="small"
-            style={{
-              color: "var(--red-accent)",
-              marginBottom: 12,
-              textAlign: "center",
-              background: "rgba(244,67,54,0.1)",
-              padding: "8px",
-              borderRadius: "8px",
-            }}
-          >
+          <div className="small" style={{ color: "var(--red-accent)", margin: "0 12px 12px", textAlign: "center", background: "rgba(244,67,54,0.1)", padding: 8, borderRadius: 8 }}>
             ❌ {error}
           </div>
         )}
-
         {txSig && (
-          <div
-            className="small"
-            style={{
-              color: "var(--gold)",
-              marginBottom: 12,
-              textAlign: "center",
-              background: "rgba(255,215,0,0.1)",
-              padding: "8px",
-              borderRadius: "8px",
-            }}
-          >
+          <div className="small" style={{ color: "var(--gold)", margin: "0 12px 12px", textAlign: "center", background: "rgba(255,215,0,0.1)", padding: 8, borderRadius: 8 }}>
             🎉 Success! Tx:{" "}
-            <a
-              href={`https://solscan.io/tx/${txSig}?cluster=devnet`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: "var(--gold)", textDecoration: "underline" }}
-            >
+            <a href={`https://solscan.io/tx/${txSig}?cluster=devnet`} target="_blank" rel="noreferrer" style={{ color: "var(--gold)", textDecoration: "underline" }}>
               {txSig.slice(0, 8)}...
             </a>
           </div>
         )}
 
-        <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 12, margin: "0 12px 12px" }}>
           <button
             className="btn"
-            style={{
-              flex: 1,
-              fontWeight: 900,
-              fontSize: "16px",
-              backgroundColor: "var(--red-accent)",
-              borderColor: "var(--red-accent)",
-            }}
-            disabled={
-              !walletConnected ||
-              !amount ||
-              loading ||
-              parseFloat(amount) <= 0 ||
-              !userStakeData
-            }
+            style={{ flex: 1, fontWeight: 900, fontSize: 16, background: "var(--gold)", color: "black" }}
+            disabled={!walletConnected || !publicKey || loading || !selected || !Number(amount)}
             onClick={handleUnstake}
           >
-            {loading ? (
-              <>
-                <span style={{ marginRight: "8px" }}>⏳</span>
-                Processing...
-              </>
-            ) : (
-              "Confirm Unstake"
-            )}
+            {loading ? "Processing..." : "Confirm Unstake"}
           </button>
-          <button
-            className="btn ghost"
-            style={{ flex: 1, fontWeight: 900, fontSize: "16px" }}
-            onClick={handleClose}
-            disabled={loading}
-          >
+          <button className="btn ghost" style={{ flex: 1, fontWeight: 900, fontSize: 16 }} disabled={loading} onClick={() => { if (!loading) { setError(""); setTxSig(""); onClose() } }}>
             Cancel
           </button>
         </div>
-
-        {loading && (
-          <div
-            style={{
-              textAlign: "center",
-              marginTop: "12px",
-              color: "var(--muted)",
-              fontSize: "12px",
-            }}
-          >
-            Please confirm the transaction in your wallet...
-          </div>
-        )}
       </div>
     </div>
   )

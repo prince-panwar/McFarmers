@@ -1,8 +1,8 @@
 import { Program } from "@coral-xyz/anchor"
 import { IDL } from "./idl"
-import { clusterApiUrl, Connection, PublicKey } from "@solana/web3.js"
+import { clusterApiUrl, Connection } from "@solana/web3.js"
 
-export const PROGRAM_ID = "4iRL6eXQxeA87WVZvjXYBDoBRjfmziL3mEtXeiVz5j1D"
+export const PROGRAM_ID = "GjezjztjW5knE9JuvnCFtU7tu8WFmdgvzL4YHnb7PFRo"
 export const NETWORK = "https://api.devnet.solana.com"
 export const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
 
@@ -12,21 +12,38 @@ export const program = new Program(IDL, {
 })
 
 // Export mint address
-export const mintAddress = "HsGeN22851E3uGJ3nERibwB4dViU3YsbVgiau3kgo25c" // Replace with your token mint
+export const mintAddress = "HsGeN22851E3uGJ3nERibwB4dViU3YsbVgiau3kgo25c"
 
-// Function to get account data (call this when needed, not at module level)
-export const getAccountData = async () => {
+
+export const getAccountData = async (walletPublicKey = null) => {
   try {
-    // Get pool accounts instead of vault (based on your program structure)
-    const poolAccounts = await program.account.pool.all()
-    const userStakeAccounts = await program.account.userStake.all()
+    // Fetch all pools
+    const pools = (program.account && program.account.pool)
+      ? await program.account.pool.all()
+      : []
 
-    return {
-      pools: poolAccounts,
-      userStakes: userStakeAccounts,
+    // Fetch user stakes (all or filtered by wallet)
+    let userStakes = []
+    const hasUserStake = program.account && program.account.userStake
+    if (hasUserStake) {
+      if (walletPublicKey) {
+        userStakes = await program.account.userStake.all([
+          {
+            memcmp: {
+              offset: 8, // skip 8-byte Anchor discriminator
+              bytes: walletPublicKey.toBase58(), // match user: Pubkey field
+            },
+          },
+        ])
+      } else {
+        userStakes = await program.account.userStake.all()
+      }
     }
+
+    return { pools, userStakes }
   } catch (error) {
     console.error("Error fetching account data:", error)
     return { pools: [], userStakes: [] }
   }
 }
+

@@ -164,7 +164,7 @@ const McStakeInitializer = () => {
 
     setIsLoading(true)
     setStatus(" Preparing your McStake pool...")
-
+   console.log(program)
     try {
       // Derive pool PDA
       const poolTypeSeed = selectedPool === "flexible" ? "flexible" : "locked"
